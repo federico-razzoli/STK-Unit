@@ -1,15 +1,9 @@
-<<<<<<< HEAD
-SQLToolKit/Unit
-===============
+<h1>SQLToolKit/Unit</h1>
 
-A Unit Test framework for MariaDB.
+<p>A Unit Test framework for MariaDB, in pure SQL</p>
 
+<pre>
 Distribution Info:  ID
 Licence:            COPYING
 Documentation:      docs/manual.html
-=======
-STK-Unit
-========
-
-A Unit Test framework for MariaDB, in pure SQL
->>>>>>> origin/master
+</pre>

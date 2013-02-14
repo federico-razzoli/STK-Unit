@@ -293,17 +293,11 @@ CREATE PROCEDURE log_result(IN res CHAR(9), IN msg CHAR(255))
 	LANGUAGE SQL
 	COMMENT 'Internal. Add an entry to test_results'
 BEGIN
-	-- name of test invoking assert()
-	DECLARE test_name    CHAR(64) DEFAULT NULL;
-	
-	-- get status vars
-	SELECT `var_val` FROM `stk_unit`.`vars` WHERE `var_key` = 'cur_test'    INTO `test_name`;
-	
 	-- log status info & error
 	INSERT INTO `stk_unit`.`test_results`
 		(`test_run`, `run_by`, `test_name`, `test_case`, `assert_num`, `results`, `msg`)
 		VALUES
-		(@__stk_run_id, CONNECTION_ID(), test_name, @__stk_test_case, @__stk_assert_num + 1, res, msg);
+		(@__stk_run_id, CONNECTION_ID(), @__stk_test_name, @__stk_test_case, @__stk_assert_num + 1, res, msg);
 END;
 
 -- empty expect table
@@ -372,7 +366,6 @@ CREATE PROCEDURE deinit_status()
 	LANGUAGE SQL
 	COMMENT 'Internal. Drop temptables used for test status'
 BEGIN
-	DROP TEMPORARY TABLE IF EXISTS `stk_unit`.`vars`;
 	DROP TEMPORARY TABLE IF EXISTS `stk_unit`.`expect`;
 END;
 
@@ -381,21 +374,8 @@ DROP PROCEDURE IF EXISTS `init_status`;
 CREATE PROCEDURE init_status()
 	MODIFIES SQL DATA
 	LANGUAGE SQL
-	COMMENT 'Internal. Create and fill vars table'
+	COMMENT 'Internal. Create and fill temp tables'
 BEGIN
-	-- we'll use this temptable to store values:
-	-- session variables may cause conflicts
-	DROP TEMPORARY TABLE IF EXISTS `stk_unit`.`vars`;
-	CREATE TEMPORARY TABLE `stk_unit`.`vars` (
-		`var_key`    CHAR(50) NOT NULL DEFAULT '',
-		`var_val`    CHAR(100) NOT NULL DEFAULT '',
-		UNIQUE INDEX `uni_key` USING HASH (`var_key`)
-	)
-		ENGINE   = 'MEMORY',
-		DEFAULT CHARACTER SET = ascii,
-		COLLATE = ascii_bin,
-		COMMENT  = 'Sort of namespace for MariaUnit internal variables';
-	
 	-- exceptions ignored/expected
 	DROP TEMPORARY TABLE IF EXISTS `stk_unit`.`expect`;
 	CREATE TEMPORARY TABLE `stk_unit`.`expect` (
@@ -470,6 +450,9 @@ BEGIN
 	do_test: LOOP
 		FETCH cur_tables INTO test_name;
 		
+		-- must be accessible from log_result()
+		SET @__stk_test_name = test_name;
+		
 		-- end of test case?
 		IF eof = TRUE THEN
 			LEAVE do_test;
@@ -480,12 +463,6 @@ BEGIN
 		IF config_get('dbug') = '1' THEN
 			CALL `stk_unit`.dbug_log(CONCAT('Found BT: `', test_name, '`'));
 		END IF;
-		
-		-- remember test_name
-		REPLACE INTO `stk_unit`.`vars`
-			(`var_key`, `var_val`)
-			VALUES
-			('cur_test', test_name);
 		
 		-- reset unit test runs
 		SET @__stk_assert_num = 0;

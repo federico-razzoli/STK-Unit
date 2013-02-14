@@ -1,6 +1,8 @@
-SQLToolKit/Unit 0.1
-A Unit Test framework for MariaDB
-Copyright Federico Razzoli 2012
+SQLToolKit/Unit
+Version: 0.trunk
+
+A Unit Test framework for MariaDB, in pure SQL
+Copyright Federico Razzoli 2012, 2013
 
 Repository: <https://github.com/santec/STK-Unit>
 Contacts: <santec@riseup.net>

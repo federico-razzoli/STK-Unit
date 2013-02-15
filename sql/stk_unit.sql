@@ -23,7 +23,10 @@ DELIMITER ||
 ##begin
 
 
--- create & select db
+-- here go test suites
+CREATE DATABASE IF NOT EXISTS `stk_suite`;
+
+-- create & select main db
 CREATE DATABASE IF NOT EXISTS `stk_unit`;
 USE `stk_unit`;
 
@@ -175,6 +178,13 @@ CREATE OR REPLACE VIEW `TEST_CASE` AS
 		WHERE `SCHEMA_NAME` LIKE BINARY 'test\_%'
 		ORDER BY `SCHEMA_NAME` ASC;
 
+-- test case names (databases starting with 'test_')
+CREATE OR REPLACE VIEW `TEST_SUITE` AS
+	SELECT `ROUTINE_NAME` AS `SUITE_NAME`
+		FROM `information_schema`.`ROUTINES`
+		WHERE `ROUTINE_SCHEMA` = 'test_suite'
+		ORDER BY `ROUTINE_SCHEMA` ASC;
+
 -- summary of each test's last run (in a relational form)
 CREATE OR REPLACE VIEW `my_dbug_log` AS
 	SELECT
@@ -212,9 +222,10 @@ CREATE PROCEDURE procedure_call(IN sp_schema CHAR(64), IN sp_name CHAR(64))
 	LANGUAGE SQL
 	COMMENT 'Calls `sp_schema`.`sp_name`()'
 BEGIN
-	SET @__stk_u_call = CONCAT('CALL `', sp_schema, '`.`', sp_name, '`();');
+	SET @__stk_call_tc = CONCAT('CALL `', sp_schema, '`.`', sp_name, '`();');
 	
-	PREPARE __stk_u_stmt_call FROM @__stk_u_call;
+	PREPARE __stk_u_stmt_call FROM @__stk_call_tc;
+	SET @__stk_call_tc = NULL;
 	EXECUTE __stk_u_stmt_call;
 	DEALLOCATE PREPARE __stk_u_stmt_call;
 END;
@@ -246,7 +257,7 @@ BEGIN
 		INTO      `stk_unit`.`config`
 		SET       `var_key`  = opt_key,
 		          `var_val`  = opt_val,
-				  `test_case` = @__stk_test_case;
+				  `test_case` = IFNULL(@__stk_test_case, '');
 END main_block ;
 
 -- gets configuration option value:
@@ -295,9 +306,9 @@ CREATE PROCEDURE log_result(IN res CHAR(9), IN msg CHAR(255))
 BEGIN
 	-- log status info & error
 	INSERT INTO `stk_unit`.`test_results`
-		(`test_run`, `run_by`, `test_name`, `test_case`, `assert_num`, `results`, `msg`)
+			(`test_run`, `run_by`, `test_name`, `test_case`, `assert_num`, `results`, `msg`)
 		VALUES
-		(@__stk_run_id, CONNECTION_ID(), @__stk_test_name, @__stk_test_case, @__stk_assert_num + 1, res, msg);
+			(@__stk_run_id, CONNECTION_ID(), @__stk_test_name, @__stk_test_case, @__stk_assert_num + 1, res, msg);
 END;
 
 -- empty expect table
@@ -366,7 +377,22 @@ CREATE PROCEDURE deinit_status()
 	LANGUAGE SQL
 	COMMENT 'Internal. Drop temptables used for test status'
 BEGIN
+	-- clean temptables
 	DROP TEMPORARY TABLE IF EXISTS `stk_unit`.`expect`;
+	
+	-- if later in this session a TC is called,
+	-- it must know that it is not part of a TS.
+	SET @__stk_ts = NULL;
+	
+	-- if a TS is called later in this session,
+	-- it must know that no TC is in progress
+	SET @__stk_test_case = NULL;
+	
+	-- clean all variables, just to be safe
+	SET @__stk_run_id       = NULL;
+	SET @__stk_test_name    = NULL;
+	SET @__stk_assert_num   = NULL;
+	SET @__stk_u_res        = NULL;
 END;
 
 -- create and fill vars table
@@ -388,8 +414,16 @@ BEGIN
 		COMMENT  = 'Exceptions to be ignored/expected';
 	
 	-- write and read run_id
-	INSERT INTO `stk_unit`.`test_run` (`run_by`) VALUES (CONNECTION_ID());
+	INSERT INTO `stk_unit`.`test_run`
+			(`run_by`, `test_suite`, `test_case`)
+		VALUES
+			(CONNECTION_ID(), IFNULL(@__stk_ts, ''), IFNULL(@__stk_test_case, ''));
 	SET @__stk_run_id = (SELECT LAST_INSERT_ID());
+	
+	-- init other vars
+	SET @__stk_test_name    = NULL;
+	SET @__stk_assert_num   = NULL;
+	SET @__stk_u_res        = NULL;
 END;
 
 -- execute a test case
@@ -397,7 +431,7 @@ DROP PROCEDURE IF EXISTS `test_case_run`;
 CREATE PROCEDURE test_case_run(IN tc CHAR(64))
 	MODIFIES SQL DATA
 	LANGUAGE SQL
-	COMMENT 'Run a test case'
+	COMMENT 'Run a Test Case'
 BEGIN
 	-- bt name
 	DECLARE test_name     CHAR(64) DEFAULT NULL;
@@ -427,16 +461,28 @@ BEGIN
 		FOR SQLWARNING, SQLEXCEPTION
 		CALL `stk_unit`.handle_exception();
 	
-	-- before read/write status vars
-	CALL `stk_unit`.init_status();
 	
-	-- remember current test case
+	SET @__stk_throw_error = TRUE;
+	
+	-- need to remember current test case
+	-- even if we're in a TS
 	SET @__stk_test_case = tc;
+	
+	-- log tc name
+	IF config_get('dbug') = '1' THEN
+		CALL `stk_unit`.dbug_log(CONCAT('Starting TC: `', IFNULL(tc, ''), '`'));
+	END IF;
+	
+	-- create temptables
+	-- (if we're not inside a TS)
+	IF @__stk_ts IS NULL THEN
+		CALL `stk_unit`.init_status();
+	END IF;
 	
 	-- prepare all tests
 	IF procedure_exists(tc, 'before_all_tests') = TRUE THEN
 		IF config_get('dbug') = '1' THEN
-			CALL `stk_unit`.dbug_log(CONCAT('Calling: `', tc, '`.`before_all_tests`'));
+			CALL `stk_unit`.dbug_log(CONCAT('Calling: `', IFNULL(tc, ''), '`.`before_all_tests`'));
 		END IF;
 		CALL procedure_call(tc, 'before_all_tests');
 	END IF;
@@ -461,7 +507,7 @@ BEGIN
 		
 		-- log test name
 		IF config_get('dbug') = '1' THEN
-			CALL `stk_unit`.dbug_log(CONCAT('Found BT: `', test_name, '`'));
+			CALL `stk_unit`.dbug_log(CONCAT('Found BT: `', IFNULL(test_name, ''), '`'));
 		END IF;
 		
 		-- reset unit test runs
@@ -472,14 +518,14 @@ BEGIN
 		-- run set_up()
 		IF exists_set_up = TRUE THEN
 			IF config_get('dbug') = '1' THEN
-				CALL `stk_unit`.dbug_log(CONCAT('Calling: `', tc, '`.`set_up`'));
+				CALL `stk_unit`.dbug_log(CONCAT('Calling: `', IFNULL(tc, ''), '`.`set_up`'));
 			END IF;
 			CALL procedure_call(tc, 'set_up');
 		END IF;
 		
 		-- run next test
 		IF config_get('dbug') = '1' THEN
-			CALL `stk_unit`.dbug_log(CONCAT('Calling BT: `', tc, '`.`', test_name, '`'));
+			CALL `stk_unit`.dbug_log(CONCAT('Calling BT: `', IFNULL(tc, ''), '`.`', IFNULL(test_name, ''), '`'));
 		END IF;
 		CALL procedure_call(tc, test_name);
 		
@@ -489,23 +535,31 @@ BEGIN
 		-- run tear_down()
 		IF exists_tear_down = TRUE THEN
 			IF config_get('dbug') = '1' THEN
-				CALL `stk_unit`.dbug_log(CONCAT('Calling: `', tc, '`.`tear_down`'));
+				CALL `stk_unit`.dbug_log(CONCAT('Calling: `', IFNULL(tc, ''), '`.`tear_down`'));
 			END IF;
 			CALL procedure_call(tc, 'tear_down');
 		END IF;
 	END LOOP;
 	CLOSE cur_tables;
 	
+	-- log tc name
+	IF config_get('dbug') = '1' THEN
+		CALL `stk_unit`.dbug_log(CONCAT('Ending TC: `', IFNULL(tc, ''), '`'));
+	END IF;
+	
 	-- clean after all tests
 	IF procedure_exists(tc, 'after_all_tests') = TRUE THEN
 		IF config_get('dbug') = '1' THEN
-			CALL `stk_unit`.dbug_log(CONCAT('Calling: `', tc, '`.`after_all_tests`'));
+			CALL `stk_unit`.dbug_log(CONCAT('Calling: `', IFNULL(tc, ''), '`.`after_all_tests`'));
 		END IF;
 		CALL procedure_call(tc, 'after_all_tests');
 	END IF;
 	
-	-- clean temptables
-	CALL `stk_unit`.deinit_status();
+	-- but if we're executing a TS, individual TC's
+	-- must not create/drop status temptable
+	IF @__stk_ts IS NULL THEN
+		CALL `stk_unit`.deinit_status();
+	END IF;
 	
 	-- no tests? error
 	IF num_tests = 0 THEN
@@ -515,8 +569,56 @@ BEGIN
 		
 		/*!50500
 			SIGNAL SQLSTATE VALUE '45000' SET
-				MESSAGE_TEXT  = '[STK/Unit] No tests found',
-				SCHEMA_NAME   = tc;
+				MESSAGE_TEXT  = '[STK/Unit.test_case_run] No tests found';
+		*/
+	END IF;
+END;
+
+-- execute a test case
+DROP PROCEDURE IF EXISTS `test_suite_run`;
+CREATE PROCEDURE test_suite_run(IN ts CHAR(64))
+	MODIFIES SQL DATA
+	LANGUAGE SQL
+	COMMENT 'Run a Test Suite'
+BEGIN
+	-- log tc name
+	IF config_get('dbug') = '1' THEN
+		CALL `stk_unit`.dbug_log(CONCAT('Starting TS: `', IFNULL(ts, ''), '`'));
+	END IF;
+	
+	IF procedure_exists('stk_suite', ts) = TRUE THEN
+		-- remember TS name: TC must not init/deinit status
+		SET @__stk_ts = ts;
+		
+		-- status initialized by TS, not individual TC's
+		CALL `stk_unit`.init_status();
+		
+		-- execute TS
+		IF config_get('dbug') = '1' THEN
+			CALL `stk_unit`.dbug_log(CONCAT('Calling TS: `', IFNULL(ts, ''), '`'));
+		END IF;
+		SET @__stk_call = CONCAT('CALL `stk_suite`.`', ts, '`();');
+		PREPARE __stk_stmt_call_ts FROM @__stk_call;
+		SET @__stk_call = NULL;
+		EXECUTE __stk_stmt_call_ts;
+		DEALLOCATE PREPARE __stk_stmt_call_ts;
+		
+		-- log TS end before cleaning
+		IF config_get('dbug') = '1' THEN
+			CALL `stk_unit`.dbug_log(CONCAT('Ending TS: `', IFNULL(ts, ''), '`'));
+		END IF;
+		
+		-- clean temptables.
+		-- for now, TS's cannot be recursive
+		CALL `stk_unit`.deinit_status();
+	ELSE
+		-- clean temptables even if somehint go wrong
+		CALL `stk_unit`.deinit_status();
+		
+		-- TS not found, throw error
+		/*!50500
+			SIGNAL SQLSTATE VALUE '45000' SET
+				MESSAGE_TEXT  = '[STK/Unit.test_suite_run] Test Suite not found';
 		*/
 	END IF;
 END;
@@ -887,10 +989,13 @@ BEGIN
 	-- run query
 	PREPARE __stk_u_stmt_assert_row_exists FROM @__stk_u_cmd_assert_row_exists;
 	EXECUTE __stk_u_stmt_assert_row_exists;
+	SET @__stk_u_cmd_assert_row_exists = NULL;
 	DEALLOCATE PREPARE __stk_u_stmt_assert_row_exists;
 	
 	-- assert
 	CALL `stk_unit`.assert(@__stk_u_res, msg);
+	
+	SET @__stk_u_res = NULL;
 END;
 
 DROP PROCEDURE IF EXISTS `assert_row_not_exists`;
@@ -932,6 +1037,8 @@ BEGIN
 	
 	-- assert
 	CALL `stk_unit`.assert(@__stk_u_res, msg);
+	
+	SET @__stk_u_res = NULL;
 END;
 
 DROP PROCEDURE IF EXISTS `assert_rows_count`;
@@ -1056,6 +1163,7 @@ BEGIN
 	
 	-- run query
 	PREPARE __stk_u_stmt_assert_field FROM @__stk_u_cmd_assert_field;
+	SET @__stk_u_cmd_assert_field = NULL;
 	EXECUTE __stk_u_stmt_assert_field;
 	DEALLOCATE PREPARE __stk_u_stmt_assert_field;
 	
@@ -1077,6 +1185,7 @@ BEGIN
 	
 	-- run query
 	PREPARE __stk_u_stmt_assert_field FROM @__stk_u_cmd_assert_field;
+	SET @__stk_u_cmd_assert_field = NULL;
 	EXECUTE __stk_u_stmt_assert_field;
 	DEALLOCATE PREPARE __stk_u_stmt_assert_field;
 	

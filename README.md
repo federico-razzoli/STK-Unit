@@ -1,9 +1,7 @@
 <h1>SQLToolKit/Unit</h1>
 
-<p>A Unit Test framework for MariaDB, in pure SQL</p>
+<p>This project moded to: https://launchpad.net/stk-unit</p>
 
-<pre>
-Distribution Info:  ID
-Licence:            COPYING
-Documentation:      docs/manual.html
-</pre>
+<p>Documentation is now here: http://stk.wikidot.com/stk-unit</p>
+
+<p>This repo is no longer mantained, and may disappear.</p>
